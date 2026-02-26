@@ -1,0 +1,117 @@
+# ============================================================
+# Fast LoRA Fine-Tuning Demo on Google Colab
+# ============================================================
+
+import torch
+from datasets import load_dataset
+from transformers import (
+    AutoTokenizer, AutoModelForCausalLM,
+    TrainingArguments, Trainer,
+    DataCollatorForLanguageModeling
+)
+from peft import LoraConfig, get_peft_model, TaskType
+
+# ------------------------------------------------------------
+# Device Check
+# ------------------------------------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# ------------------------------------------------------------
+# 1. Load Small Dataset
+# ------------------------------------------------------------
+dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+dataset = dataset["train"].select(range(500))  # only 500 samples
+
+# ------------------------------------------------------------
+# 2. Load Model + Tokenizer
+# ------------------------------------------------------------
+model_name = "distilgpt2"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+model = AutoModelForCausalLM.from_pretrained(model_name)
+model.resize_token_embeddings(len(tokenizer))
+model.to(device)
+
+# ------------------------------------------------------------
+# 3. Tokenization
+# ------------------------------------------------------------
+def tokenize_function(examples):
+    return tokenizer(
+        examples["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=64   # shorter sequence length
+    )
+
+tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+
+# ------------------------------------------------------------
+# 4. LoRA Config
+# ------------------------------------------------------------
+lora_config = LoraConfig(
+    r=4, lora_alpha=8,
+    target_modules=["c_attn"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.CAUSAL_LM
+)
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+
+# ------------------------------------------------------------
+# 5. Data Collator
+# ------------------------------------------------------------
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+# ------------------------------------------------------------
+# 6. Training Args (minimal)
+# ------------------------------------------------------------
+training_args = TrainingArguments(
+    output_dir="./lora-gpt2-demo",
+    per_device_train_batch_size=4,
+    num_train_epochs=1,
+    max_steps=100,   # cap training steps
+    logging_steps=20,
+    learning_rate=2e-4,
+    fp16=torch.cuda.is_available(),
+    report_to="none"
+)
+
+# ------------------------------------------------------------
+# 7. Trainer
+# ------------------------------------------------------------
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_dataset,
+    data_collator=data_collator
+)
+
+# ------------------------------------------------------------
+# 8. Train
+# ------------------------------------------------------------
+trainer.train()
+
+# ------------------------------------------------------------
+# 9. Save LoRA Weights
+# ------------------------------------------------------------
+model.save_pretrained("./lora-gpt2-demo")
+
+# ------------------------------------------------------------
+# 10. Quick Generation
+# ------------------------------------------------------------
+prompt = "AI will transform"
+inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_length=30,   # shorter output
+        temperature=0.8,
+        top_k=40
+    )
+
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
